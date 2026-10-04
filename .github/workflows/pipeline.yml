@@ -1,17 +1,22 @@
 # ===========================================================================
 # CI/CD pipeline for the SDLC demo app
 #
-#   Pull request to main  ->  LINT -> TEST -> BUILD               (CI only)
-#   Push / merge to main  ->  LINT -> TEST -> BUILD -> DEPLOY     (CI + CD)
+#                                    ┌─ TEST ────────┐
+#   Push to any branch    ->  LINT ─┤               ├─> BUILD               (CI only)
+#   Pull request to main  ->        └─ CODEQL SCAN ─┘                       (CI only)
+#   Push / merge to main  ->  ...same as above...       BUILD -> DEPLOY      (CI + CD)
 #
 # Each job = one stage of the delivery lifecycle. A failing stage stops
-# everything after it ("fail fast").
+# everything after it ("fail fast"). Stage 2 jobs run in parallel.
 # ===========================================================================
 name: CI/CD Pipeline
 
 on:
   push:
-    branches: [main]
+    # Every branch gets CI; DEPLOY below still only runs for main.
+    # Dependabot branches are skipped here because their PRs run the pipeline
+    # anyway, and push runs by Dependabot can't upload CodeQL results.
+    branches-ignore: ['dependabot/**']
   pull_request:
     branches: [main]
   workflow_dispatch: # allows a manual run from the Actions tab
@@ -41,10 +46,10 @@ jobs:
       - run: npm run lint
 
   # -------------------------------------------------------------------------
-  # STAGE 2: TEST - unit + integration tests with a coverage report.
+  # STAGE 2a: TEST - unit + integration tests with a coverage report.
   # -------------------------------------------------------------------------
   test:
-    name: 2. Test
+    name: 2a. Test
     needs: lint
     runs-on: ubuntu-latest
     steps:
@@ -62,12 +67,36 @@ jobs:
           path: coverage/
 
   # -------------------------------------------------------------------------
+  # STAGE 2b: CODEQL SCAN (SAST) - GitHub's static analysis looks for
+  # security bugs in OUR code (injection, XSS, ...). Findings appear under
+  # the repo's Security tab -> Code scanning, and as comments on PRs.
+  # -------------------------------------------------------------------------
+  codeql:
+    name: 2b. CodeQL scan
+    needs: lint
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      security-events: write # needed to upload results to the Security tab
+    steps:
+      - uses: actions/checkout@v4
+      - uses: github/codeql-action/init@v4
+        with:
+          languages: javascript-typescript
+          queries: security-extended
+      - uses: github/codeql-action/analyze@v4
+        with:
+          category: /language:javascript-typescript
+
+  # -------------------------------------------------------------------------
   # STAGE 3: BUILD - package an immutable release artifact.
   # "Build once, deploy many": the exact tarball tested here is what ships.
+  # Only runs if tests AND the security scan passed.
   # -------------------------------------------------------------------------
   build:
     name: 3. Build
-    needs: test
+    needs: [test, codeql]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
