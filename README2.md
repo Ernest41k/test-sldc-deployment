@@ -26,22 +26,6 @@
 
 ## 5. Connect GitHub to EC2 (one time)
 
-1. Create a GitHub repository and push this project to the `main` branch:
-   ```bash
-   git init -b main
-   git add .
-   git commit -m "Initial commit"
-   git remote add origin https://github.com/<you>/<repo>.git
-   git push -u origin main
-   ```
-2. In the repo go to **Settings → Secrets and variables → Actions**:
-
-   | Kind | Name | Value |
-   |---|---|---|
-   | **Secret** | `EC2_SSH_KEY` | Entire contents of your `.pem` file, including the `BEGIN`/`END` lines |
-   | **Variable** | `EC2_HOST` | Public IP or DNS of the instance, e.g. `54.12.34.56` |
-   | **Variable** | `EC2_USER` | `ec2-user` |
-
 # Create a GitHub Repository
 test-sldc-deployment
 git init
@@ -50,3 +34,26 @@ git commit -m "first commit"
 git branch -M main
 git remote add origin git@github.com:Ernest41k/test-sldc-deployment.git
 git push -u origin main
+
+2. In the repo go to **Settings → Secrets and variables → Actions**:
+
+   | Kind | Name | Value |
+   |---|---|---|
+   | **Secret** | `EC2_SSH_KEY` | Entire contents of your `.pem` file, including the `BEGIN`/`END` lines |
+   | **Variable** | `EC2_HOST` | Public IP or DNS of the instance, e.g. `54.12.34.56` |
+   | **Variable** | `EC2_USER` | `ec2-user` |
+
+# Create a feature branch
+git checkout -b TIC-sldc
+git add .
+git commit -m "deploying sldc app to ec2"
+git push origin TIC-sldc
+
+# Create a pull request. (This should trigger the feature branch pipeline to run without deploying the app)
+Once pipeline succeeds, 
+Click on "Pull requests"
+Click on you Pull Request
+click on "merge pull request"
+Click on "Confirm Pull request" to merge to main branch
+Click on "Actions" to monitor you running main branch pipeline
+merge to main
