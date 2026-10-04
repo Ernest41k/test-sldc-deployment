@@ -1,0 +1,158 @@
+# ===========================================================================
+# CI/CD pipeline for the SDLC demo app
+#
+#   Pull request to main  ->  LINT -> TEST -> BUILD               (CI only)
+#   Push / merge to main  ->  LINT -> TEST -> BUILD -> DEPLOY     (CI + CD)
+#
+# Each job = one stage of the delivery lifecycle. A failing stage stops
+# everything after it ("fail fast").
+# ===========================================================================
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: # allows a manual run from the Actions tab
+
+# Never run two deploys at the same time.
+concurrency:
+  group: pipeline-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  NODE_VERSION: '22'
+
+jobs:
+  # -------------------------------------------------------------------------
+  # STAGE 1: LINT - static analysis / code style. Cheapest check, runs first.
+  # -------------------------------------------------------------------------
+  lint:
+    name: 1. Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+
+  # -------------------------------------------------------------------------
+  # STAGE 2: TEST - unit + integration tests with a coverage report.
+  # -------------------------------------------------------------------------
+  test:
+    name: 2. Test
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage/
+
+  # -------------------------------------------------------------------------
+  # STAGE 3: BUILD - package an immutable release artifact.
+  # "Build once, deploy many": the exact tarball tested here is what ships.
+  # -------------------------------------------------------------------------
+  build:
+    name: 3. Build
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install production dependencies only
+        run: npm ci --omit=dev
+
+      - name: Stamp build metadata
+        run: |
+          cat > build-info.json <<EOF
+          {
+            "version": "$(node -p "require('./package.json').version")",
+            "commit": "${GITHUB_SHA::7}",
+            "runNumber": ${GITHUB_RUN_NUMBER},
+            "builtAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          }
+          EOF
+          cat build-info.json
+
+      - name: Create release tarball
+        run: tar -czf release.tar.gz src node_modules package.json build-info.json
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release
+          path: release.tar.gz
+          retention-days: 7
+
+  # -------------------------------------------------------------------------
+  # STAGE 4: DEPLOY - ship the artifact to EC2. Only on main, never on PRs.
+  # The "production" environment can be set to require manual approval.
+  # -------------------------------------------------------------------------
+  deploy:
+    name: 4. Deploy to EC2
+    needs: build
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: http://${{ vars.EC2_HOST }}
+    steps:
+      - uses: actions/checkout@v4 # for deploy/deploy.sh
+
+      - name: Download release artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: release
+
+      - name: Configure SSH
+        env:
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+          EC2_HOST: ${{ vars.EC2_HOST }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$EC2_SSH_KEY" > ~/.ssh/ec2.pem
+          chmod 600 ~/.ssh/ec2.pem
+          ssh-keyscan -H "$EC2_HOST" >> ~/.ssh/known_hosts
+
+      - name: Copy release to server
+        env:
+          TARGET: ${{ vars.EC2_USER }}@${{ vars.EC2_HOST }}
+        run: |
+          scp -i ~/.ssh/ec2.pem release.tar.gz deploy/deploy.sh "$TARGET":/tmp/
+
+      - name: Run deploy script on server
+        env:
+          TARGET: ${{ vars.EC2_USER }}@${{ vars.EC2_HOST }}
+        run: |
+          RELEASE_ID="$(date -u +%Y%m%d%H%M%S)-${GITHUB_SHA::7}"
+          ssh -i ~/.ssh/ec2.pem "$TARGET" "bash /tmp/deploy.sh $RELEASE_ID /tmp/release.tar.gz"
+
+      # -----------------------------------------------------------------------
+      # STAGE 5: VERIFY - smoke test from outside, through nginx, like a user.
+      # -----------------------------------------------------------------------
+      - name: Smoke test
+        env:
+          EC2_HOST: ${{ vars.EC2_HOST }}
+        run: |
+          curl -fsS "http://$EC2_HOST/health"
+          echo
+          DEPLOYED_COMMIT=$(curl -fsS "http://$EC2_HOST/api/version" | jq -r .commit)
+          echo "Live commit: $DEPLOYED_COMMIT  Expected: ${GITHUB_SHA::7}"
+          test "$DEPLOYED_COMMIT" = "${GITHUB_SHA::7}"
